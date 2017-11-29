@@ -1,0 +1,8 @@
+Package: benMisc
+Title: Helper functions written by and for Ben Ewing.
+Version: 0.0.0.9000
+Authors@R: person("Ben", "Ewing", email = "ben.ewing@cloudburstgroup.com", role = c("aut", "cre"))
+Description: This package contains a number of helper functions written by and for Ben Ewing.
+Depends: R (>= 3.4.2)
+Encoding: UTF-8
+LazyData: true
