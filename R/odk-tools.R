@@ -73,6 +73,11 @@ split_select_multiples <- function(survey, choices, language = NULL) {
   # Fix negatives here as well..
   survey$relevant <- gsub("_-", "__", survey$relevant)
 
+  # Label select_multiples as a binary type, we'll add this to the choices automatically
+  # when Stata labeling. This is really hacky. Sorry.
+  survey$type <- ifelse(grepl("select_multiple", survey$type, fixed = T),
+                        "select_one sm_binary",
+                        survey$type)
   return(survey)
 }
 
@@ -304,7 +309,9 @@ odk_to_stata <- function(survey, choices, language = NULL, df, file = "codebook.
            mash =  as.character(mash)) %>%
     group_by(list_name) %>%
     summarise(smash = paste0(mash, collapse = " ")) %>%
-    rename(type = list_name)
+    rename(type = list_name) %>%
+    # Add category for sm_binary
+    add_row(type = "sm_binary", smash = '0 "No" 1 "Yes"')
 
   # Need to remove tpyes: start, today, deviceid,  date, text, integer, decimal, calculate
   survey.st.val.labs <- subset(survey.st, !(survey.st$type %in% c(
