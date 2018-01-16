@@ -345,3 +345,190 @@ odk_to_stata <- function(survey, choices, language = NULL, df, file = "codebook.
   writeLines(st, fileConn)
   close(fileConn)
 }
+
+#' Generates an R script which adds skip patterns corresponding to the survey
+#' relevant row.
+#' Requires that the survey given matches the dataframe
+#' (e.g. split select multiples, split repeats).
+#'
+#' @param survey The corresponding ODK survey.
+#' @param df The dataframe.
+#' @param language Language, if any.
+#' @param skip_code What do we want to use as a skip code.
+#' @param file The output file.
+gen_skip_script <- function(survey, df, language = NULL, skip_code = "-98",
+                            return_not_present = T,
+                            outfile = "skip_codes.R") {
+  # We do this by translating the relevant column to R code.
+  # We also want this script to show some useful information about the var,
+  # e.g. description, relevant.
+  # We also generate freq tables before/after the skip pattern to verify they
+  # are correct.
+
+  # What do the labels look like? ie take into account language
+  label <- ifelse(is.null(language), "label", paste0("label::", language))
+  survey$label <- survey[,label]
+
+  # Useful to have the dataframe name
+  df_name <- deparse(substitute(df))
+
+  # Apply group relevant
+  survey <- apply_group_relevant(survey)
+
+  # Drop anything that isn't a var
+  survey <- survey[which(!(survey$type %in% c("note", "begin group",
+                                              "begin repeat", "end",
+                                              "end group", "end repeat"))), ]
+
+  # Drop vars not present in data, but warn user
+  not_present <- setdiff(survey$name, names(df))
+  if (!is_empty(not_present)) {
+    warning(paste0("The following variables are present in the survey, but not the df: ",
+                   paste0(not_present, collapse = ", ")))
+    survey <- survey[which(!(survey$name %in% not_present)), ]
+  }
+
+  # Parse relevant into R code.
+  survey <- parse_rel(survey, df_name)
+
+  # No label
+  survey$label <- ifelse(is.na(survey$label), "No label.", survey$label)
+
+  # Remove new lines from labels
+  survey$label <- str_replace_all(survey$label, "\n", " ")
+
+  # Use this to arrange the script nicely
+  survey$id <- 1:nrow(survey)
+
+  # Turn this into an R script
+  survey$r_1 <- 80-2-1-nchar(survey$name)
+  survey$r_1 <- sapply(survey$r_1,
+                       function(x) paste0(rep("-", ifelse(is.na(x),
+                                                          0,
+                                                          x)),
+                                          collapse = ""))
+  survey$r_1 <- paste0("# ", survey$name, " ", survey$r_1)
+  survey$r_2 <- paste0("# ", survey$label)
+  survey$r_3 <- paste0("table(", df_name, "$", survey$name, ", exclude = NULL)")
+  survey$r_4 <- ifelse(!(is.na(survey$relevant) | survey$relevant == ""),
+                       paste0(df_name, "$", survey$name, "[!(", survey$relevant, ")] <- ", skip_code),
+                       NA)
+  survey$r_5 <- ifelse(!(is.na(survey$relevant) | survey$relevant == ""),
+                       paste0("table(", df_name, "$", survey$name, ", exclude = NULL)"),
+                       NA)
+  survey$r_6 <- rep(paste0("#", paste0(rep("-", 79), collapse = "")), nrow(survey))
+  survey$r_7 <- ""
+  # dplyr fun..
+  survey <- survey %>%
+    select(name, id, r_1, r_2, r_3, r_4, r_5, r_6, r_7) %>%
+    gather(var, code, -name, -id) %>%
+    arrange(id, name, var) %>%
+    select(code) %>%
+    na.omit
+
+  fileConn <- file(outfile)
+  writeLines(survey$code, fileConn)
+  close(fileConn)
+
+  # Return for help
+  if (!is_empty(not_present) & return_not_present) {
+    return(not_present)
+  }
+}
+
+#' Applies group relevants to all members.
+#'
+#' @param survey An ODK survey.
+#'
+#' @return The ODK survey with relevant column applied to groups.
+apply_group_relevant <- function(survey) {
+
+  # check for empty rels:
+
+  # We sequentially add/remove group skips to this vector
+  group_rel <- c()
+  for (i in 1:nrow(survey)) {
+    # If beginning a group with a rel, add to the group rel
+    if (grepl("begin\\sgroup|begin\\srepeat", survey$type[i])) {
+      group_rel <- c(group_rel, survey$relevant[i])
+    } else if (grepl("end\\sgroup|end\\srepeat", survey$type[i])) {
+      # If ending a group, remove the last rel, like an onion
+      if (!is_empty(group_rel))
+        group_rel <- group_rel[-length(group_rel)]
+    } else {
+      # If not a group, apply the rel, along with the rel already on
+      # the var
+      group_rel.temp <- c(group_rel, survey$relevant[i])
+      # Subset to remove those with only whitespace or NAs
+      group_rel.temp <- na.omit(group_rel.temp)
+      group_rel.temp <- group_rel.temp[which(!(grepl("^\\s*$", group_rel.temp)))]
+      survey$relevant[i] <- paste0(group_rel.temp, collapse = " and ")
+      group_rel.temp <- NULL
+    }
+    # print(paste0(group_rel.temp, collapse = " and "))
+    # group_rel.temp <- NULL
+  }
+
+  return(survey)
+}
+
+#' Parses the ODK relevant column, and turns it into R code :)
+#'
+#' @param survey An ODK survey.
+#' @param df_name Name of the dataframe is important.
+#'
+#' @return The ODK survey with relevant column changed to R code.
+parse_rel <- function(survey, df_name) {
+
+  # Split and and or statements so we can fix each with requirement without
+  # interfering with the other
+  rel <- str_split(survey$relevant, "(?=(?<![A-z])and|(?<![A-z])or)")
+
+  # ${.} to df$.
+  rel <- lapply(rel,
+                function(rel)
+                  str_replace_all(rel, "\\$\\{", paste0(df_name, "$")) %>%
+                  str_replace_all("\\}", "")
+  )
+
+  # change single equals to double, except where >= or <=
+  rel <- lapply(rel,
+                function(rel)
+                  str_replace_all(rel,
+                                  "(?<!\\<|\\>)\\={1,}",
+                                  "==")
+  )
+
+  # count-selected
+  rel <- lapply(rel,
+                function(rel)
+                  ifelse(grepl("count\\-selected", rel),
+                         {
+                           str_replace_all(rel,
+                                           "count\\-selected\\(",
+                                           "unlist(lapply(str_split(") %>%
+                             str_replace_all("\\)", ', " "), length))')
+                         },
+                         rel)
+  )
+
+  # selected
+  rel <- lapply(rel,
+                function(rel)
+                  ifelse(grepl("selected\\(", rel),
+                         {
+                           str_replace_all(rel, "selected\\(", "") %>%
+                             str_replace_all(",[[:space:]]{0,}'", "==") %>%
+                             str_replace_all("'[[:space:]]{0,}\\)", "")
+                         },
+                         rel)
+  )
+  # paste back together
+  survey$relevant <- unlist(lapply(rel, paste, collapse = ""))
+
+  # Change "and" "or" "not"
+  survey$relevant <- str_replace_all(survey$relevant, "(?<![A-z]|\\(|\\)|\\[|\\])and", "&")
+  survey$relevant <- str_replace_all(survey$relevant, "(?<![A-z]|\\(|\\)|\\[|\\])or", "|")
+  survey$relevant <- str_replace_all(survey$relevant, "(?<![A-z]|\\(|\\)|\\[|\\])not", "!")
+  return(survey)
+}
